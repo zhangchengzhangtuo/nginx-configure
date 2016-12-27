@@ -1,0 +1,223 @@
+Nginx日志文件可以记录的信息相当丰富，而且格式可以定制，考虑到`$time_local`请求时间字段几乎必有，这是一个典型的基于文件的时间序列数据库。
+
+日志格式：
+log_format main '$remote_addr - $remote_user [$time_local] "$request" '
+                '$status  $body_bytes_sent $request_time $upstream_response_time '
+                '$upstream_addr "$http_referer" "$http_user_agent" "$http_x_forwarded_for"';
+
+字段及其含义：
+$remote_addr：远程客户端的IP地址
+$remote_user：远程客户端用户名称，用于记录浏览者进行身份验证时提供的名字，如登录百度的用户名scq2099yt，如果没有登录就是空白
+[$time_local]：访问的时间与时区，比如18/Jul/2012:17:00:01 +0800，时间信息最后的"+0800"表示服务器所处时区位于UTC之后的8小时。
+$request：请求的URI和HTTP协议，这是整个PV日志记录中最有用的信息，记录服务器收到一个什么样的请求
+$status：记录请求返回的http状态码，比如成功就是200
+$upstream_status：upstream状态，比如成功是200
+$body_bytes_sent：发送给客户端的文件主体内容的大小，比如899，可以将日志每条记录中的这个值累加起来以粗略估计服务器吞吐量。
+$http_referer：记录从哪个页面链接访问过来的
+$http_user_agent：客户端浏览器信息
+$http_x_forwarded_for：客户端的真实ip，通常web服务器放在反向代理的后面，这样就不能获取到客户的IP地址了，通过$remote_add拿到的IP地址是反向代理服务器的iP地址。反向代理服务器在转发请求的http头信息中，可以增加x_forwarded_for信息，用以记录原有客户端的IP地址和原来客户端的请求的服务器地址
+$ssl_protocol：SSL协议版本，比如TLSv1
+$ssl_cipher：交换数据中的算法，比如RC4-SHA。
+$upstream_addr：upstream的地址，即真正提供服务的主机地址。
+$request_time：整个请求的总时间，指的是从接收用户请求的第一个字节到发送完响应数据的响应时间，即包括接受请求数据时间、程序响应时间、输出响应数据时间。
+$upstream_response_time：请求过程中，upstream的响应时间，即从nginx向后端建立连接开始到接受完数据然后关闭连接为止的时间。
+
+注：从上面的描述可以看出，$request_time肯定比$upstream_response_time值大，特别是使用POST方式传递参数时，因为Nginx会把request body缓存住，接受完毕后才会把数据一起发给后端。所以如果用户网络较差，或者传递数据较大时，$request_time会比$upstream_response_time大很多。
+
+
+1）计算每秒的请求数
+less access.log | awk '{sec=substr($4,2,20);reqs++;reqsBySec[sec]++;} END{print reqs/length(reqsBySec)}'
+2)计算峰值每秒请求数
+less access.log | awk '{sec=substr($4,2,20);requests[sec]++;} END{for(s in requests){printf("%s %s\n", requests[s],s)}}' | sort -nr | head -n 3
+
+2)计算某类请求总的带宽和每类请求的平均单个请求带宽大小以及请求次数
+less access.log | awk '{url=$7;requests[url]++;bytes[url]+=$10} END{ for(url in requests) {printf("%sMB %sKB/req %s %s\n", bytes[url]/1024/1024, bytes[url]/requests[url]/1024,requests[url], url)}}' | sort -nr | head -n 15
+结果：
+9.63211e-05MB 0.0986328KB/req 1 /api/locationService/cities?userId=83906
+9.53674e-05MB 0.0976562KB/req 1 /api/userService/users/1/deviceToken?userId=1
+9.53674e-05MB 0.0976562KB/req 1 /api/locationService/cities?userId=1
+8.01086e-05MB 0.0820312KB/req 1 /api/userService/verificationCodes
+3.05176e-05MB 0.03125KB/req 1 /login;JSESSIONID=1309d040-14bd-41df-b444-14e807fbb40a
+1.64098MB 840.184KB/req 2 /static/image/login-bg.png
+1.1564MB 197.359KB/req 6 /static/dep/vue/vue.js
+0.532763MB 90.9248KB/req 6 /static/dep/jq/jquery-1.10.2.min.js
+0.251724MB 128.883KB/req 2 /app/plugins/angular-ui-router.js
+0.236891MB 121.288KB/req 2 /static/css/bootstrap.min.css
+0.209837MB 107.437KB/req 2 /app/plugins/angular.min.js
+0.166569MB 28.4277KB/req 6 /static/js/bootstrap.min.js
+0.155741MB 79.7393KB/req 2 /app/plugins/angular-animate.js
+0.139641MB 71.4961KB/req 2 /app/js/server.js
+0.113228MB 57.9727KB/req 2 /app/js/jquery.nicescroll.js
+
+备注：Nginx配置文件中日志格式使用了$body_sent_size，指HTTP响应体的大小，如果想查看整个响应的大小，应该使用变量$sent_size。
+
+3）计算某类请求总的后端响应时间以及该类请求的平均单个请求后端响应时间以及请求次数
+less access.log | awk '{printf "%s %s\n",$12,$7}' |sed -re 's/(.*)\?.*/\1/g' -e 's/' | awk '{requests[$2]++;time[$2]+=$1} END{for(url in requests){printf("%smin %ss/req %s %s\n", time[url] / 60, time[url] /requests[url], requests[url], url)}}' | sort -nr
+
+除去.txt .html .jpg .png .js .css .ico .ttf .html之后统计结果：
+less access.log | awk '{printf "%s %s\n",$12,$7}' |sed -re 's/(.*)\?.*/\1/g' | awk '{requests[$2]++;time[$2]+=$1} END{for(url in requests){printf("%smin %ss/req %s %s\n", time[url] / 60, time[url] /requests[url], requests[url], url)}}' | grep -v '.html\|.png\|.js\|.css\|.ttf\|.jpg\|.txt\|.ico' | sort -nr
+结果：
+0.671433min 13.4287s/req 3 /api/web/fileupload/uploadImg
+0.1731min 5.193s/req 2 /api/web/route/recommen/uploadexcel
+0.157283min 9.437s/req 1 /api/web/orders/common/pay/money
+0.13475min 0.351522s/req 23 /api/transactionService/orders
+0.111917min 2.23833s/req 3 /api/web/routes/accurate/launch
+0.108233min 0.81175s/req 8 /api/flightService/flights
+0.0833667min 1.0004s/req 5 /api/versions
+0.0458167min 2.749s/req 1 /api/transactionService/orders/52722/tickets
+0.0327667min 0.983s/req 2 /api/userService/activities
+0.0304min 0.202667s/req 9 /api/web/enquiry/list
+
+4）计算某类请求总的请求时间以及该类请求的平均单个请求时间以及请求次数
+less access.log | awk '{printf "%s %s\n",$11,$7}' |sed -re 's/(.*)\?.*/\1/g' -e 's/' | awk '{requests[$2]++;time[$2]+=$1} END{for(url in requests){printf("%smin %ss/req %s %s\n", time[url] / 60, time[url] /requests[url], requests[url], url)}}' | sort -nr
+
+除去.txt .html .jpg .png .js .css .ico .ttf .html之后统计结果：
+less access.log | awk '{printf "%s %s\n",$11,$7}' |sed -re 's/(.*)\?.*/\1/g' | awk '{requests[$2]++;time[$2]+=$1} END{for(url in requests){printf("%smin %ss/req %s %s\n", time[url] / 60, time[url] /requests[url], requests[url], url)}}' | grep -v '.html\|.png\|.js\|.css\|.ttf\|.jpg\|.txt\|.ico' | sort -nr
+结果：
+0.726683min 14.5337s/req 3 /api/web/fileupload/uploadImg
+0.173367min 5.201s/req 2 /api/web/route/recommen/uploadexcel
+0.157283min 9.437s/req 1 /api/web/orders/common/pay/money
+0.13475min 0.351522s/req 23 /api/transactionService/orders
+0.1126min 2.252s/req 3 /api/web/routes/accurate/launch
+0.108233min 0.81175s/req 8 /api/flightService/flights
+0.0833667min 1.0004s/req 5 /api/versions
+0.0458167min 2.749s/req 1 /api/transactionService/orders/52722/tickets
+0.0327667min 0.983s/req 2 /api/userService/activities
+0.0306667min 0.204444s/req 9 /api/web/enquiry/list
+
+5）慢查询
+第一步：是不是用户的网络状况不好？根据既往的经验，如果只有少量的请求较慢，而前后其他IP的请求都较快，通常是用户手机或网络状况不佳引起的。最简单的方法，统计慢查询所占比例：
+慢查询所占比例极低，再根据用户手机型号、访问时间、访问页面等信息看能否定位到指定的请求，结合前后不同用户的请求，就可以确定是否用户的网络状况不好了。
+
+发生慢查询的某个时间点，发生慢查询的请求个数占该时间点所有请求个数的比例，该时间点发生慢查询请求的个数，该时间点发生请求的总个数
+less access.log | awk -v limit=2 '{min=substr($4,2,17);reqs[min]++;if($11>limit){slowReqs[min]++}} END{for(m in slowReqs){printf("%s %s%s %s %s\n", m, slowReqs[m]/reqs[m] * 100, "%", slowReqs[m], reqs[m])}}' | sort -rn -k2
+结果：
+26/Dec/2016:14:06 100% 1 1
+26/Dec/2016:11:12 100% 2 2
+26/Dec/2016:10:36 100% 1 1
+26/Dec/2016:10:16 50% 1 2
+26/Dec/2016:10:38 37.5% 3 8
+26/Dec/2016:11:09 33.3333% 1 3
+26/Dec/2016:13:38 32.1429% 9 28
+26/Dec/2016:10:17 30% 15 50
+26/Dec/2016:13:35 25% 1 4
+26/Dec/2016:14:21 16.6667% 4 24
+26/Dec/2016:14:47 11.5942% 8 69
+26/Dec/2016:13:37 9.09091% 2 22
+26/Dec/2016:14:19 8% 4 50
+26/Dec/2016:10:39 7.79221% 6 77
+26/Dec/2016:10:29 7.69231% 1 13
+26/Dec/2016:13:32 7.40741% 2 27
+26/Dec/2016:14:29 7.14286% 1 14
+26/Dec/2016:10:33 5.76923% 3 52
+26/Dec/2016:14:13 4.93827% 4 81
+26/Dec/2016:13:51 4.7619% 1 21
+26/Dec/2016:10:56 4.54545% 3 66
+26/Dec/2016:14:48 3.33333% 1 30
+26/Dec/2016:14:20 2.65487% 3 113
+26/Dec/2016:11:53 2.63158% 1 38
+26/Dec/2016:11:06 2.5% 1 40
+26/Dec/2016:13:15 2.22222% 1 45
+26/Dec/2016:14:22 1.85185% 1 54
+26/Dec/2016:14:15 1.81818% 1 55
+26/Dec/2016:13:24 1.36986% 1 73
+
+发生慢查询的url，发生慢查询的请求个数占该url所有请求个数的比例，发生慢查询url的请求个数，该url的所有请求
+less access.log | awk '{printf "%s %s\n",$11,$7}' | sed -re 's/(.*)\?.*/\1/g' | awk -v limit=2 '{min=$2;reqs[min]++;if($1>limit){slowReqs[min]++}} END{for(m in slowReqs){printf("%s %s%s %s %s\n", m, slowReqs[m]/reqs[m] * 100, "%", slowReqs[m], reqs[m])}}' | sort -rn -k2
+结果：
+/api/web/route/recommen/uploadexcel 100% 2 2
+/api/web/fileupload/uploadImg 100% 3 3
+/api/transactionService/orders/52722/tickets 100% 1 1
+/app/images/login-bg.png 90.9091% 10 11
+/nn/images/indexbg.jpg 54.5455% 6 11
+/static/image/login-bg.png 50% 3 6
+/api/web/orders/common/pay/money 50% 1 2
+/api/auth/moduleSearch 33.3333% 1 3
+/app/plugins/angular.min.js 28% 7 25
+/app/plugins/angular-animate.js 27.2727% 3 11
+/api/web/routes/accurate/launch 25% 1 4
+/api/flightService/flights 25% 2 8
+/api/web/person/shortmess 20% 1 5
+/api/versions 20% 1 5
+/api/account/loginSubmit 20% 1 5
+/app/plugins/angular.min.js.map 16.6667% 1 6
+/app/css/style-responsive.css 16.6667% 1 6
+/app/css/style2.css 16.6667% 1 6
+/app/plugins/angular-ui-router.js 16% 4 25
+/app/js/controller.js 15.3846% 2 13
+/app/css/Confirm.css 15.3846% 2 13
+/merchantaudit 14.2857% 1 7
+/merchant 14.2857% 1 7
+/favicon.ico 14.2857% 1 7
+/app/css/bootstrap.min.css 13.0435% 3 23
+/nn/images/plane.png 12.5% 1 8
+/app/css/style.css 12.5% 3 24
+/app/images/plane.png 11.1111% 1 9
+/app/images/go_back.png 11.1111% 1 9
+/app/css/nn.css 11.1111% 2 18
+/app/css/fonticon.css 9.09091% 1 11
+/app/fonts/css/font-awesome.min.css 8.33333% 1 12
+/app/css/common.css 7.69231% 1 13
+/app/js/controller-pend.js 7.14286% 1 14
+/app/js/controller-passengers.js 7.14286% 1 14
+/app/js/controller-nav.js 7.14286% 1 14
+/app/js/controller-home.js 7.14286% 1 14
+/app/js/controller-cancel.js 7.14286% 1 14
+/app/images/logo.png 5.88235% 1 17
+/api/web/login 5.26316% 1 19
+/api/transactionService/orders 4.34783% 1 23
+/api/payments/advance/alipay 4.34783% 1 23
+/app/js/nn/jquery.jedate.min.js 3.7037% 1 27
+/app/images/favicon.ico 3.7037% 1 27
+/api/web/enquiry/list 2.5% 1 40
+
+
+6）查看后端哪台应用服务器是否很慢
+第二步：是不是应用系统的瓶颈？对比应用服务器的返回时间($upstream_response_time字段），与Nginx服务器的处理时间($request_time字段)，先快速排查是否某一台服务器抽风。
+
+导流到某个服务器上面的请求个数，该请求个数占总请求个数的比例，每个服务器的平均响应时间，服务器地址
+less access.log | awk '{upServer=$13;upTime=$12;if(upServer == "-"){upServer="Nginx"};if(upTime == "-"){upTime=0};upTimes[upServer]+=upTime;count[upServer]++;totalCount++;} END{for(server in upTimes){printf("%s %s%s %ss %s\n", count[server], count[server]/totalCount * 100, "%", upTimes[server]/count[server], server)}}' | sort -nr
+结果：
+1226 51.9052% 0.218672s 127.0.0.1:8077
+744 31.4987% 0.127331s 127.0.0.1:8078
+295 12.4894% 0.142675s 127.0.0.1:8079
+89 3.76799% 0.510045s 127.0.0.1:12080
+8 0.338696% 0s Nginx
+注：我这里因为测试环境每个服务只部署在一台服务器上，所以每个服务只有一台主机，可能看的不明显，如果相同服务部署了多个服务的话，可能看的更明显一点
+
+不幸，市场部此次推广活动，访问压力增大，所有服务器都在变慢，更可能是应用系统的性能达到了瓶颈。如果此时带宽都没跑满，在硬件扩容之前，考虑优化重点API、缓存、静态化策略吧，达到一个基本的要求：“优化系统，让瓶颈落到带宽上”。
+
+7）查看每秒的流量
+第三步：应用系统没有瓶颈，是带宽的问题？快速查看一下每秒的流量。
+
+less access.log | awk '{second=substr($4,2,20);bytes[second]+=$10;} END{for(s in bytes){printf("%s %sKB\n", s,bytes[s]/1024)}}'
+结果：
+26/Dec/2016:10:17:23 41.9658KB
+26/Dec/2016:10:17:25 3.90723KB
+26/Dec/2016:14:31:50 0.00390625KB
+26/Dec/2016:10:34:08 0.120117KB
+26/Dec/2016:15:02:58 0.118164KB
+26/Dec/2016:13:26:12 5.17676KB
+26/Dec/2016:13:26:13 4.30273KB
+26/Dec/2016:13:26:14 4.63379KB
+26/Dec/2016:14:21:20 15.3154KB
+26/Dec/2016:14:21:22 3.86816KB
+
+如果峰值带宽接近出口带宽最大值了，幸福的烦恼，利用前面介绍的不同URL的带宽统计，做定向优化，或者加带宽吧。
+
+8）查看被哪些爬虫爬过了，以及占比
+less access.log | egrep 'spider|bot' | awk '{name=$17;if(index($15,"spider")>0){name=$15};spiders[name]++} END{for(name in spiders) {printf("%s %s\n",spiders[name], name)}}' | sort -nr
+
+9)转化率的计算：
+比如我司的就可以根据发布行程url和下单url来描绘一个每天转化率的动态曲线图，甚至可以维护某一个旅行社的转化率的曲线图
+
+事实上，上述分析限于Nginx日志，如果有系统日志，并且日志格式定义良好，可以做的事情远不止于此：这是一个时间序列数据库，可以查询IT系统的运行情况，可以分析营销活动的效果，也可以预测业务数据的趋势；这是一个比较小但够用的大数据源，运用你学会的大数据分析方法，也可以像滴滴那样，分并预测不同天气、时间段下不同地区的车辆供需，并作出优化。
+
+几点建议：
+1）规范日志格式。这是很多团队容易忽略的地方，有时候多一个空格会让日志分析的复杂度大为增加。
+2）无论如何，使用时间戳字段。以时间序列的方式看待日志文件，这也是很多公司把系统日志直接写入到时间序列数据库的原因；
+3）如有可能，记录以下字段：用户（或者客户端）标识、单次请求标识、应用标识（如果单次请求会走到多个应用）。能够方便地查出用户链路、请求链路，是排查错误请求、分析用户行为的基础；
+4）关注写的操作。就像业务建模时，需要特别关注具有时标性、状态会发生改变的模型一样，任何写的操作，都应记录到日志系统中。万一某个业务出错，不但可以通过业务模型复演，也可以通过日志系统复演。
+5）规范URL格式。这一点同样容易遭到忽略，商品详情页面要不要添加"?from=XXX"来源参数？支付页面采用路径标记“payment/alipay”，还是参数标记“/payment?type=alipay”更合适？区别细微但影响不可忽略。
+
+
