@@ -1,0 +1,157 @@
+环境准备：
+1.安装openssl
+
+2.定位一下OpenSSL的配置文件openssl.cnf   可以用locate openssl.cnf来定位
+一般情况目录位于：/etc/pki/tls/openssl.cnf
+修改该配置文件中[ CA_default ]证书存放地址,比如dir=/home/user/CA
+然后在该目录下依次创建certs、newcerts、private、crl文件夹以及index.txt、serial
+mkdir certs         存放已颁发的证书
+mkdir newcerts      存放CA指令生成的新证书
+mkdir private       存放私钥
+mkdir crl           存放已吊销的证书
+touch index.txt     OpenSSL定义的已签发的文本数据库文件，这个文件通常在初始化的时候是空的
+echo 01>serial      证书签发时使用的序列号参考文件，该文件的序列号是以16进制格式进行存放的，该文件必须提供并且包含一个有效的序列号
+
+
+3.构建根证书
+1）构建根证书前，需要构建随机数文件（.rand）,完整命令如
+openssl rand -out private/.rand 1000
+rand       随机数命令。这里将随机数文件输出到private目录下。
+-out      输出文件路径，
+这里的参数1000，指定来产生伪随机字节数
+
+2）构建根证书私钥
+openssl genrsa -aes256 -out private/cakey.pem 2048
+该命含义如下：
+genrsa——使用RSA算法产生私钥
+-aes256——使用256位密钥的AES算法对私钥进行加密
+-out——输出文件的路径
+2048——指定私钥长度
+
+3）生成根证书签发申请文件(csr文件)
+openssl req -new -key private/cakey.pem -out private/ca.csr -subj "/C=CN/ST=Zhejiang/L=Hangzhou/O=apinji/OU=apinji/CN=*.apinji.cn"
+req          产生证书签发申请命令
+-new         表示新请求
+-key         密钥,这里为private/cakey.pem文件
+-out         输出路径,这里为private/ca.csr文件
+-subj        指定用户信息
+得到根证书签发申请文件后，我们可以将其发生给CA机构签发，当然我们也可以自行签发根证书
+
+4)签发根证书(自行签发根证书)
+openssl x509 -req -days 365 -sha256 -extensions v3_ca -signkey private/cakey.pem -in private/ca.csr -out certs/ca.cer
+x509        签发X.509格式证书命令。
+-req        表示证书输入请求。
+-days       表示有效天数,这里为10000天。
+-sha256     表示证书摘要算法,这里为SHA256算法。
+-extensions 表示按OpenSSL配置文件v3_ca项添加扩展。
+-signkey    表示自签名密钥,这里为private/cakey.pem。
+-in         表示输入文件,这里为private/ca.csr。
+-out        表示输出文件,这里为certs/ca.cer。
+
+5）根证书转化
+OpenSSL产生的数据证书不能再JAVA语言环境中直接使用，需要将其转化为PKCS#12编码格式。
+openssl pkcs12 -export -cacerts -inkey private/cakey.pem -in certs/ca.cer -out certs/ca.p12
+pkcs12          PKCS#12编码格式证书命令。
+-export         表示导出证书。
+-cacerts        表示仅导出CA证书。
+-inkey          表示输入密钥,这里为private/cakey.pem
+-in             表示输入文件,这里为certs/ca.cer
+-out            表示输出文件,这里为certs/ca.p12
+导出的时候需要设置密码，这里设置为apinji
+个人信息交换文件（PKCS#12） 可以作为密钥库或信任库使用，我们可以通过KeyTool查看密钥库的详细信息
+
+6）查看密钥库信息
+keytool -list -keystore certs/ca.p12 -storetype pkcs12 -v -storepass apinji
+注意，这里参数-storetype值为"pkcs12",-storepass值即为在上面导出时候输入的密码
+
+4.构建服务器证书
+1）构建服务器私钥
+openssl genrsa -aes256 -out private/serverkey.pem 2048
+genrsa       产生RSA密钥命令。
+-aes256      使用AES算法（256位密钥）对产生的私钥加密。可选算法包括DES，DESede，IDEA和AES。
+-out         输出路径,这里指private/server.key.pem。
+这里的参数2048，指RSA密钥长度位数，默认长度为512位
+
+2）生成服务器证书签发申请
+openssl req -new -key private/serverkey.pem -out private/server.csr -subj "/C=CN/ST=Zhejiang/L=Hangzhou/O=apinji/OU=apinji/CN=*.apinji.cn"
+req          产生证书签发申请命令
+-new         表示新请求。
+-key         密钥,这里为private/serverkey.pem文件
+-out         输出路径,这里为private/server.csr文件
+-subj        指定用户信息
+我们已经获得了根证书，可以使用根证书签发服务器证书。
+
+3)签发服务器证书
+openssl x509 -req -days 365 -sha256 -extensions v3_req -CA certs/ca.cer -CAkey private/cakey.pem -CAserial ca.srl -CAcreateserial -in private/server.csr -out certs/server.cer
+x509           签发X.509格式证书命令。
+-req           表示证书输入请求。
+-days          表示有效天数,这里为365天。
+-sha256        表示证书摘要算法,这里为SHA256算法。
+-extensions    表示按OpenSSL配置文件v3_req项添加扩展。
+-CA            表示CA证书,这里为certs/ca.cer
+-CAkey         表示CA证书密钥,这里为private/cakey.pem
+-CAserial      表示CA证书序列号文件,这里为ca.srl
+-CAcreateserial表示创建CA证书序列号
+-in            表示输入文件,这里为private/server.csr
+-out           表示输出文件,这里为certs/server.cer
+
+4)服务器证书转换
+openssl pkcs12 -export -clcerts -inkey private/serverkey.pem -in certs/server.cer -out certs/server.p12
+pkcs12         PKCS#12编码格式证书命令。
+-export        表示导出证书。
+-clcerts       表示仅导出客户证书。
+-inkey         表示输入文件,这里为private/serverkey.pem
+-in            表示输入文件,这里为certs/ca.cer
+-out           表示输出文件,这里为certs/server.p12
+我们已经构建了服务器证书（server.cer）,并可使用该证书构建基于单向认证网络
+
+
+5.构建客户端证书
+1）openssl genrsa -aes256 -out private/clientkey.pem 2048
+2）openssl req -new -key private/clientkey.pem -out private/client.csr -subj "/C=CN/ST=Zhejiang/L=Hangzhou/O=apinji/OU=apinji/CN=*.apinji.cn"
+3)openssl x509 -req -days 365 -sha256 -extensions v3_req -CA certs/ca.cer -CAkey private/cakey.pem -CAserial ca.srl -in private/client.csr -out certs/client.cer
+4)openssl pkcs12 -export -inkey private/clientkey.pem -in certs/client.cer -out certs/client.p12
+5)keytool -importkeystore -v  -srckeystore client.p12 -srcstoretype pkcs12 -srcstorepass apinji -destkeystore client.jks -deststoretype jks -deststorepass apinji
+将pkcs12格式的转换成jks格式的
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
